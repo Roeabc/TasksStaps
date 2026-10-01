@@ -1,0 +1,21 @@
+# Xcode / build 产物
+build/
+DerivedData/
+dist/
+*.ipa
+*.xcarchive
+*.dSYM/
+*.xcuserstate
+xcuserdata/
+*.moved-aside
+
+# XcodeGen 生成的工程（由 project.yml 复现，无需入库）
+TasksSteps.xcodeproj/
+
+# macOS
+.DS_Store
+
+# 本地签名临时文件
+*.mobileprovision
+*.p12
+*.cer
