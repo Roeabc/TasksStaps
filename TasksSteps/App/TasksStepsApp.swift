@@ -3,7 +3,6 @@ import SwiftUI
 @main
 struct TasksStepsApp: App {
     @StateObject private var store = TaskStore()
-    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -11,9 +10,8 @@ struct TasksStepsApp: App {
                 .environmentObject(store)
                 .tint(Theme.accent)
         }
-        .onChange(of: scenePhase) { phase in
-            // 退到后台时落盘，避免数据丢失
-            if phase != .active { store.save() }
-        }
+        // 落盘已经在 TaskStore 的每次改动里做了（save()），
+        // 这里不再挂 onChange(of: scenePhase) —— 它在 iOS 17 已废弃，
+        // 用双参数写法又和 TaskListView 里的重复，直接删掉最干净。
     }
 }
