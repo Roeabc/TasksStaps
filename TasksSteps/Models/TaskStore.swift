@@ -14,8 +14,9 @@ struct TaskNode: Identifiable, Codable, Hashable {
     var createdAt: Date = Date()
     var completedAt: Date?
 
-    init(title: String, note: String = "") {
+       init(title: String, done: Bool = false, note: String = "") {
         self.title = title
+        self.done = done
         self.note = note
     }
 }
