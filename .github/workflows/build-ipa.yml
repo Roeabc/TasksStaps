@@ -1,0 +1,157 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      sign_mode:
+        description: "unsigned = 纯未签名（交给签名工具）| adhoc = 先打占位签名"
+        required: true
+        default: unsigned
+        type: choice
+        options:
+          - unsigned
+          - adhoc
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # macOS runner 自带 Xcode 与 iOS SDK —— 这是唯一能编译出 iOS 二进制的环境
+    runs-on: macos-14
+    timeout-minutes: 40
+
+    env:
+      SCHEME: TasksSteps
+      PROJECT: TasksSteps.xcodeproj
+      CONFIG: Release
+      BUILD_DIR: build
+      OUT_DIR: dist
+      IPA_NAME: TasksSteps-unsigned.ipa
+      # 默认完全不签名；只有手动触发并选了 adhoc 才会被下面的步骤覆盖。
+      # （不要在这里直接用 github.event.inputs —— push 事件下它是空的）
+      SIGN_MODE: unsigned
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Override sign mode (manual dispatch only)
+        id: cfg
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          echo "SIGN_MODE=${{ github.event.inputs.sign_mode }}" >> "$GITHUB_ENV"
+          echo "mode=${{ github.event.inputs.sign_mode }}" >> "$GITHUB_OUTPUT"
+
+      - name: Select Xcode and show SDK
+        run: |
+          # 选装着的【最新】Xcode：新版 XcodeGen 默认写最新的工程格式（objectVersion 77），
+          # 用老 Xcode 会打不开。macos-14 上通常有 15.4 和 16.x，取最高那个最省事。
+          NEWEST=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$NEWEST" ]; then
+            echo "==> 选用 $NEWEST"
+            sudo xcode-select -s "$NEWEST"
+          fi
+          echo "=== Xcode ==="
+          xcodebuild -version
+          echo "=== 已安装的 Xcode ==="
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+          echo "=== iOS SDK ==="
+          xcodebuild -showsdks | grep -i iphoneos || true
+          echo "=== python3 ==="
+          python3 --version || true
+
+      - name: Install XcodeGen
+        run: |
+          command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
+          xcodegen --version
+
+      - name: Generate Xcode project
+        run: |
+          set -euo pipefail
+
+          # 先看一眼 project.yml 里有没有显式指定工程格式
+          if grep -q "projectFormat" project.yml; then
+            if xcodegen generate --spec project.yml; then
+              echo "==> 用 project.yml 的 projectFormat 生成成功"
+            else
+              echo "==> 当前 XcodeGen 不认识 project.yml 里的 projectFormat，改用忽略该行的临时 spec"
+              sed '/projectFormat/d' project.yml > .project.nofmt.yml
+              xcodegen generate --spec .project.nofmt.yml
+              rm -f .project.nofmt.yml
+            fi
+          else
+            xcodegen generate --spec project.yml
+          fi
+
+          echo "=== 生成的工程格式 ==="
+          grep -m1 -E "objectVersion|compatibilityVersion" TasksSteps.xcodeproj/project.pbxproj || true
+
+      - name: Normalize project format if it is newer than this Xcode
+        run: |
+          # 新版 XcodeGen 写 objectVersion = 77，Xcode 15.x 打不开，需要降下来
+          python3 scripts/normalize_project.py TasksSteps.xcodeproj --auto
+          echo "=== 归一化后 ==="
+          grep -m1 -E "objectVersion|compatibilityVersion" TasksSteps.xcodeproj/project.pbxproj || true
+
+      - name: Build app (no certificate, no provisioning profile)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIG" \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$BUILD_DIR" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            clean build
+
+      - name: Verify it is a real arm64 Mach-O app
+        run: |
+          APP="$BUILD_DIR/Build/Products/$CONFIG-iphoneos/$SCHEME.app"
+          test -d "$APP" || { echo "app bundle missing: $APP"; exit 1; }
+          echo "--- lipo ---"
+          lipo -info "$APP/$SCHEME"
+          echo "--- LC_BUILD_VERSION (min iOS / sdk) ---"
+          otool -l "$APP/$SCHEME" | grep -A5 LC_BUILD_VERSION | head -20 || true
+          echo "--- plist sanity ---"
+          plutil -p "$APP/Info.plist" | head -30
+
+      - name: Optional ad-hoc signature (SIGN_MODE=adhoc)
+        if: ${{ env.SIGN_MODE == 'adhoc' }}
+        run: |
+          APP="$BUILD_DIR/Build/Products/$CONFIG-iphoneos/$SCHEME.app"
+          /usr/bin/codesign --force --sign - --timestamp=none "$APP"
+          /usr/bin/codesign -dv --verbose=4 "$APP" 2>&1 | head -20 || true
+
+      - name: Package IPA (Payload + zip)
+        run: |
+          APP="$BUILD_DIR/Build/Products/$CONFIG-iphoneos/$SCHEME.app"
+          rm -rf "$OUT_DIR"
+          mkdir -p "$OUT_DIR/Payload"
+          cp -R "$APP" "$OUT_DIR/Payload/"
+          # 只清理扩展属性，绝不删除 _CodeSignature —— 否则签名会失效
+          xattr -cr "$OUT_DIR/Payload" || true
+          cd "$OUT_DIR"
+          /usr/bin/zip -qry "$IPA_NAME" Payload -x ".*" -x "__MACOSX"
+          ls -lh "$IPA_NAME"
+          shasum -a 256 "$IPA_NAME" | tee "$IPA_NAME.sha256"
+          echo "--- ipa 内容 ---"
+          unzip -l "$IPA_NAME" | head -20
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TasksSteps-unsigned-ipa
+          path: |
+            dist/TasksSteps-unsigned.ipa
+            dist/TasksSteps-unsigned.ipa.sha256
+          if-no-files-found: error
+          retention-days: 30
