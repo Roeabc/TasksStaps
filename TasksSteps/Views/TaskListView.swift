@@ -3,13 +3,15 @@ import SwiftUI
 /// 首页：任务列表 + 总进度概览
 struct TaskListView: View {
     @EnvironmentObject private var store: TaskStore
-    @Environment(\.scenePhase) private var scenePhase
 
     @State private var showingEditor = false
     @State private var pendingDelete: Task?
     @State private var lastDeleted: Task?
     @State private var showUndoBar = false
-    @State private var undoDismissTask: Task<Void, Never>?
+    /// 注意：这里必须写 `_Concurrency.Task`。本 App 自己定义了一个叫 `Task` 的模型
+    /// （Models/TaskStore.swift），不加模块限定的话 `Task<Void, Never>` 会被解析成那个模型，
+    /// 报 "cannot specialize non-generic type 'Task'"。
+    @State private var undoDismissWork: _Concurrency.Task<Void, Never>?
 
     private var visible: [Task] { store.displayedTasks }
 
@@ -75,9 +77,6 @@ struct TaskListView: View {
                 Button("取消", role: .cancel) { pendingDelete = nil }
             } message: {
                 Text("该任务下的所有节点也会一起删除。")
-            }
-            .onChange(of: scenePhase) { phase in
-                if phase == .background { store.save() }
             }
         }
     }
@@ -187,15 +186,15 @@ struct TaskListView: View {
         }
     }
 
+    /// 4 秒后自动收起撤回条。
+    /// 同样要用 `_Concurrency.Task`，否则会被解析成 App 自己的 `Task` 模型。
     private func scheduleUndoDismiss() {
-        undoDismissTask?.cancel()
-        undoDismissTask = Task {
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
-            if !Task.isCancelled {
-                await MainActor.run {
-                    withAnimation { showUndoBar = false }
-                    lastDeleted = nil
-                }
+        undoDismissWork?.cancel()
+        undoDismissWork = _Concurrency.Task { @MainActor in
+            try? await _Concurrency.Task.sleep(nanoseconds: 4_000_000_000)
+            if !_Concurrency.Task.isCancelled {
+                withAnimation { showUndoBar = false }
+                lastDeleted = nil
             }
         }
     }
