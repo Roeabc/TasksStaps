@@ -64,7 +64,7 @@ final class TaskStore: ObservableObject {
     @Published var tasks: [Task] = []
     @Published var sortMode: SortMode = .manual
 
-    enum SortMode: String, CaseIterable, Identifiable {
+    enum SortMode: String, CaseIterable, Identifiable, Codable {
         case manual, createdAsc, progressDesc, dueAsc
 
         var id: String { rawValue }
